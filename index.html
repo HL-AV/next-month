@@ -225,7 +225,11 @@ async function save() {
     saving = false;
     render(j.data.schedule);
     if (j.data.mailSent) setStatus('저장 완료 ✓', 'ok');
-    else setStatus('저장은 완료됐지만 메일 발송에 실패했습니다: ' + (j.data.mailError || ''), 'err');
+    else {
+      const msg = '저장은 완료됐지만 메일 발송에 실패했습니다. 별도로 메일을 보내야 합니다.';
+      setStatus(msg, 'err');
+      alert(msg);
+    }
   } catch (err) {
     saving = false;
     updateSaveButton();
