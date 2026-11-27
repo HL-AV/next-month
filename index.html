@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>내 스케줄 조회·수정</title>
+<style>
+  :root { --green:#92d050; --line:#7f7f7f; --sel:#1a73e8; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:"Malgun Gothic","맑은 고딕","Apple SD Gothic Neo",sans-serif; background:#f4f6f8; color:#222; }
+  header { background:#fff; padding:14px 16px; border-bottom:1px solid #ddd; }
+  h1 { font-size:18px; margin:0 0 10px; }
+  .form { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  input[type=text], button { font:inherit; font-size:15px; padding:8px 10px; border:1px solid #bbb; border-radius:6px; background:#fff; }
+  input[type=text] { width:140px; }
+  button.primary { background:#2e7d32; color:#fff; border-color:#2e7d32; cursor:pointer; }
+  button.save { background:#1565c0; color:#fff; border-color:#1565c0; cursor:pointer; font-weight:bold; }
+  button:disabled { background:#cfd8dc !important; border-color:#cfd8dc !important; color:#fff; cursor:default; }
+  .help { font-size:13px; color:#555; margin-top:8px; line-height:1.5; }
+  #status { font-size:13px; margin-left:4px; }
+  .err { color:#c62828; } .ok { color:#2e7d32; }
+  #notice { font-size:13px; font-weight:bold; margin-top:6px; color:#1565c0; }
+  #notice.closed { color:#c62828; }
+  main { padding:12px; padding-bottom:110px; }
+  .wrap { overflow:auto; background:#fff; border:1px solid var(--line); max-height:calc(100vh - 230px); }
+  table { border-collapse:collapse; font-size:13px; white-space:nowrap; }
+  th, td { border:1px solid var(--line); padding:0 4px; height:28px; text-align:center; }
+  thead th { position:sticky; z-index:2; font-weight:bold; }
+  thead tr:nth-child(1) th { top:0; }
+  thead tr:nth-child(2) th { top:28px; }
+  thead tr:nth-child(3) th { top:56px; }
+  .sticky { position:sticky; left:0; z-index:1; }
+  thead th.sticky { z-index:3; }
+  td.store { min-width:150px; }
+  td.day { min-width:34px; cursor:pointer; user-select:none; }
+  td.day:hover { outline:2px solid #9ec5ff; outline-offset:-2px; }
+  td.day.selected { outline:3px solid var(--sel); outline-offset:-3px; }
+  td.day.changed { box-shadow:inset 0 0 0 2px #ef6c00; font-weight:bold; color:#e65100 !important; }
+  td.day.v-text { font-size:11px; letter-spacing:-0.5px; }
+  td.day.locked { cursor:default; }
+  td.day.locked:hover { outline:none; }
+  .empty { padding:30px; text-align:center; color:#666; }
+  #bar { position:fixed; left:0; right:0; bottom:0; background:#fff; border-top:1px solid #ccc; padding:10px 12px calc(10px + env(safe-area-inset-bottom)); display:none; box-shadow:0 -2px 8px rgba(0,0,0,.08); z-index:10; }
+  #bar.show { display:block; }
+  #barTitle { font-size:13px; color:#444; margin-bottom:8px; }
+  #bar .btns { display:flex; gap:8px; }
+  #bar .btns button { flex:1; padding:12px 0; font-size:16px; font-weight:bold; cursor:pointer; }
+  #bar .b1 { background:#e8f5e9; } #bar .b2 { background:#fff8e1; } #bar .b3 { background:#e3f2fd; } #bar .b4 { background:#fbe9e7; }
+</style>
+</head>
+<body>
+<header>
+  <h1>내 스케줄 조회·수정</h1>
+  <div class="form">
+    <input id="name" type="text" placeholder="이름 입력" autocomplete="off">
+    <button id="go" class="primary">조회</button>
+    <button id="save" class="save" disabled>저장</button>
+    <span id="status"></span>
+  </div>
+  <div class="help">날짜 칸을 누르고 <b>1</b>(근무) · <b>연차</b> · <b>추가</b> · <b>지우기</b>(휴무) 중에서만 입력<br>
+  입력을 마친 뒤 <b>저장</b> 버튼을 눌러야 저장됩니다.</div>
+  <div id="notice"></div>
+</header>
+<main><div id="out"></div></main>
+
+<div id="bar">
+  <div id="barTitle"></div>
+  <div class="btns">
+    <button class="b1" data-v="1">1</button>
+    <button class="b2" data-v="연차">연차</button>
+    <button class="b3" data-v="추가">추가</button>
+    <button class="b4" data-v="">지우기</button>
+  </div>
+</div>
+
+<script>
+// ▼▼ Apps Script 웹 앱 URL ▼▼
+const API_URL = 'https://script.google.com/macros/s/AKfycbxskkUJHDozPqHF1X70XTeruEMwMaiDLOdcyhmIxfKwBONApyY8IoZ_64YJgAFxiz-aMQ/exec';
+// ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+
+const ALLOWED = ['', '1', '연차', '추가'];
+const $ = (id) => document.getElementById(id);
+let current = null;          // 마지막으로 받은 데이터
+let selected = null;         // { td, rowObj, day }
+let changes = new Map();     // "행-일" → { row, store, day, value, original }
+let saving = false;
+
+function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+function setStatus(msg, cls) { const s = $('status'); s.textContent = msg || ''; s.className = cls || ''; }
+
+async function api(params, body) {
+  let res;
+  if (body) {
+    res = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
+  } else {
+    res = await fetch(API_URL + '?' + new URLSearchParams(params).toString());
+  }
+  const j = await res.json();
+  if (!j.ok) throw new Error(j.error || '오류가 발생했습니다.');
+  return j;
+}
+
+function colorOk(c) { return c && c.toLowerCase() !== '#ffffff' && c.toLowerCase() !== 'white'; }
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m])); }
+
+function makeCell(tag, c, extraClass) {
+  const el = document.createElement(tag);
+  el.textContent = c.v;
+  if (c.rs > 1) el.rowSpan = c.rs;
+  if (c.cs > 1) el.colSpan = c.cs;
+  el.style.background = c.bg || '#ffffff';
+  if (c.fc && c.fc.toLowerCase() !== '#000000') el.style.color = c.fc;
+  if (extraClass) el.className = extraClass;
+  return el;
+}
+
+function updateSaveButton() {
+  const n = changes.size;
+  const btn = $('save');
+  btn.disabled = saving || n === 0 || !current || current.closed;
+  btn.textContent = n ? '저장 (' + n + '건)' : '저장';
+}
+
+function render(data) {
+  current = data;
+  changes.clear();
+  closeBar();
+  const nt = $('notice');
+  if (data.closed) { nt.textContent = '취합이 마감되었습니다. (' + data.deadline + '까지) 조회만 가능합니다.'; nt.className = 'closed'; }
+  else if (data.deadline) { nt.textContent = data.deadline + '까지 입력 가능'; nt.className = ''; }
+  else { nt.textContent = ''; }
+
+  const out = $('out');
+  const oldWrap = out.querySelector('.wrap');
+  const keepX = oldWrap ? oldWrap.scrollLeft : 0, keepY = oldWrap ? oldWrap.scrollTop : 0;
+  out.innerHTML = '';
+  updateSaveButton();
+  if (!data.rows.length) {
+    out.innerHTML = '<div class="empty">"' + escapeHtml(data.name) + '" 이름의 스케줄이 없습니다. 이름을 다시 확인하세요.</div>';
+    return;
+  }
+  const wrap = document.createElement('div'); wrap.className = 'wrap';
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  data.header.forEach((row) => {
+    const tr = document.createElement('tr');
+    row.forEach((c, j) => {
+      if (!c) return;
+      const th = makeCell('th', c, j === 0 ? 'sticky' : '');
+      if (!colorOk(c.bg)) th.style.background = '#92d050';
+      tr.appendChild(th);
+    });
+    thead.appendChild(tr);
+  });
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  data.rows.forEach((r) => {
+    const tr = document.createElement('tr');
+    r.cells.forEach((c, j) => {
+      if (!c) return;
+      if (j >= data.dayOff) {
+        const day = data.days[j - data.dayOff];
+        const td = makeCell('td', c, 'day' + (c.v === '연차' || c.v === '추가' ? ' v-text' : ''));
+        td.dataset.day = day;
+        td.dataset.original = c.v;
+        if (data.closed) td.classList.add('locked');
+        else td.addEventListener('click', (e) => { e.stopPropagation(); select(td, r, day); });
+        tr.appendChild(td);
+      } else {
+        tr.appendChild(makeCell('td', c, j === 0 ? 'sticky store' : ''));
+      }
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  out.appendChild(wrap);
+  wrap.scrollLeft = keepX; wrap.scrollTop = keepY;
+}
+
+function select(td, rowObj, day) {
+  if (saving) return;
+  if (selected) selected.td.classList.remove('selected');
+  selected = { td, rowObj, day };
+  td.classList.add('selected');
+  $('barTitle').textContent = rowObj.store + ' · ' + day + '일  (현재: ' + (td.textContent || '휴무') + ')';
+  $('bar').classList.add('show');
+}
+
+function closeBar() {
+  if (selected) selected.td.classList.remove('selected');
+  selected = null;
+  $('bar').classList.remove('show');
+}
+
+// 화면에서만 바꿈 (저장 버튼을 눌러야 시트에 저장)
+function setValue(v) {
+  if (!selected || !current || saving) return;
+  if (ALLOWED.indexOf(v) < 0) return;               // 허용 값 외에는 무시
+  const { td, rowObj, day } = selected;
+  td.textContent = v;
+  td.classList.toggle('v-text', v === '연차' || v === '추가');
+  const key = rowObj.row + '-' + day;
+  if (v === td.dataset.original) {
+    changes.delete(key);
+    td.classList.remove('changed');
+  } else {
+    changes.set(key, { row: rowObj.row, store: rowObj.store, day: day, value: v });
+    td.classList.add('changed');
+  }
+  closeBar();
+  updateSaveButton();
+  setStatus(changes.size ? '저장하지 않은 변경 ' + changes.size + '건' : '', changes.size ? 'err' : '');
+}
+
+async function save() {
+  if (!current || !changes.size || saving) return;
+  if (!confirm('변경한 ' + changes.size + '건을 저장할까요?')) return;
+  saving = true;
+  updateSaveButton();
+  setStatus('저장 중…');
+  try {
+    const j = await api(null, { sheet: current.sheet, name: current.name, changes: Array.from(changes.values()) });
+    saving = false;
+    render(j.data.schedule);
+    if (j.data.mailSent) setStatus('저장 완료 ✓', 'ok');
+    else setStatus('저장은 완료됐지만 메일 발송에 실패했습니다: ' + (j.data.mailError || ''), 'err');
+  } catch (err) {
+    saving = false;
+    updateSaveButton();
+    setStatus('저장 실패: ' + err.message, 'err');
+    alert('저장하지 못했습니다.\n' + err.message);
+  }
+}
+
+async function load() {
+  const name = $('name').value.trim();
+  if (!name) { setStatus('이름을 입력하세요.', 'err'); return; }
+  if (changes.size && !confirm('저장하지 않은 변경 ' + changes.size + '건이 사라집니다. 다시 조회할까요?')) return;
+  store('scheduleName', name);
+  setStatus('불러오는 중…');
+  try {
+    const j = await api({ action: 'schedule', name });
+    render(j.data);
+    setStatus('');
+  } catch (err) {
+    setStatus(err.message, 'err');
+  }
+}
+
+$('go').addEventListener('click', () => load());
+$('save').addEventListener('click', () => save());
+$('name').addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
+document.querySelectorAll('#bar button').forEach((b) => b.addEventListener('click', (e) => { e.stopPropagation(); setValue(b.dataset.v); }));
+$('bar').addEventListener('click', (e) => e.stopPropagation());
+document.addEventListener('click', () => closeBar());
+document.addEventListener('keydown', (e) => {
+  if (!selected || e.target.tagName === 'INPUT') return;
+  if (e.key === '1') setValue('1');
+  else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); setValue(''); }
+  else if (e.key === 'Escape') closeBar();
+});
+// 저장 안 하고 창을 닫으려 할 때 경고
+window.addEventListener('beforeunload', (e) => { if (changes.size) { e.preventDefault(); e.returnValue = ''; } });
+
+$('name').value = store('scheduleName') || '';
+if ($('name').value) load();
+</script>
+</body>
+</html>
