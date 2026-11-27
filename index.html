@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>내 스케줄 조회·수정</title>
+<style>
+  :root { --green:#92d050; --line:#7f7f7f; --sel:#1a73e8; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:"Malgun Gothic","맑은 고딕","Apple SD Gothic Neo",sans-serif; background:#f4f6f8; color:#222; }
+  header { background:#fff; padding:14px 16px; border-bottom:1px solid #ddd; }
+  h1 { font-size:18px; margin:0 0 10px; }
+  .form { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  select, input[type=text], button { font:inherit; font-size:15px; padding:8px 10px; border:1px solid #bbb; border-radius:6px; background:#fff; }
+  input[type=text] { width:140px; }
+  button.primary { background:#2e7d32; color:#fff; border-color:#2e7d32; cursor:pointer; }
+  .help { font-size:13px; color:#555; margin-top:8px; line-height:1.5; }
+  #status { font-size:13px; margin-left:4px; }
+  .err { color:#c62828; } .ok { color:#2e7d32; }
+  main { padding:12px; padding-bottom:110px; }
+  .wrap { overflow:auto; background:#fff; border:1px solid var(--line); max-height:calc(100vh - 210px); }
+  table { border-collapse:collapse; font-size:13px; white-space:nowrap; }
+  th, td { border:1px solid var(--line); padding:0 4px; height:28px; text-align:center; }
+  thead th { position:sticky; z-index:2; font-weight:bold; }
+  thead tr:nth-child(1) th { top:0; }
+  thead tr:nth-child(2) th { top:28px; }
+  thead tr:nth-child(3) th { top:56px; }
+  .sticky { position:sticky; left:0; z-index:1; }
+  thead th.sticky { z-index:3; }
+  td.store { min-width:150px; }
+  td.day { min-width:34px; cursor:pointer; user-select:none; }
+  td.day:hover { outline:2px solid #9ec5ff; outline-offset:-2px; }
+  td.day.selected { outline:3px solid var(--sel); outline-offset:-3px; }
+  td.day.pending { opacity:.45; }
+  td.day.v-text { font-size:11px; letter-spacing:-0.5px; }
+  #notice { font-size:13px; font-weight:bold; margin-top:6px; color:#1565c0; }
+  #notice.closed { color:#c62828; }
+  td.day.locked { cursor:default; }
+  td.day.locked:hover { outline:none; }
+  .empty { padding:30px; text-align:center; color:#666; }
+  #bar { position:fixed; left:0; right:0; bottom:0; background:#fff; border-top:1px solid #ccc; padding:10px 12px calc(10px + env(safe-area-inset-bottom)); display:none; box-shadow:0 -2px 8px rgba(0,0,0,.08); z-index:10; }
+  #bar.show { display:block; }
+  #barTitle { font-size:13px; color:#444; margin-bottom:8px; }
+  #bar .btns { display:flex; gap:8px; }
+  #bar .btns button { flex:1; padding:12px 0; font-size:16px; font-weight:bold; cursor:pointer; }
+  #bar .b1 { background:#e8f5e9; } #bar .b2 { background:#fff8e1; } #bar .b3 { background:#e3f2fd; } #bar .b4 { background:#fbe9e7; }
+</style>
+</head>
+<body>
+<header>
+  <h1>내 스케줄 조회·수정</h1>
+  <div class="form">
+    <input id="name" type="text" placeholder="이름 입력" autocomplete="off">
+    <button id="go" class="primary">조회</button>
+    <span id="status"></span>
+  </div>
+  <div class="help">날짜 칸을 누르고 <b>1</b>(근무) · <b>연차</b> · <b>추가</b> · <b>지우기</b>(휴무) 중에서만 입력</div>
+  <div id="notice"></div>
+</header>
+<main><div id="out"></div></main>
+
+<div id="bar">
+  <div id="barTitle"></div>
+  <div class="btns">
+    <button class="b1" data-v="1">1</button>
+    <button class="b2" data-v="연차">연차</button>
+    <button class="b3" data-v="추가">추가</button>
+    <button class="b4" data-v="">지우기</button>
+  </div>
+</div>
+
+<script>
+// ▼▼ Apps Script 웹 앱 URL을 여기에 붙여넣으세요 ▼▼
+const API_URL = 'https://script.google.com/macros/s/AKfycbxskkUJHDozPqHF1X70XTeruEMwMaiDLOdcyhmIxfKwBONApyY8IoZ_64YJgAFxiz-aMQ/exec';
+// ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+
+const ALLOWED = ['', '1', '연차', '추가'];
+const $ = (id) => document.getElementById(id);
+let current = null;      // 마지막으로 받은 데이터
+let selected = null;     // { td, rowObj, day }
+let queue = Promise.resolve();
+let pending = 0;
+
+function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+function setStatus(msg, cls) { const s = $('status'); s.textContent = msg || ''; s.className = cls || ''; }
+
+async function api(params, body) {
+  if (!API_URL || API_URL.indexOf('PASTE_') === 0) throw new Error('index.html 의 API_URL 을 먼저 설정하세요.');
+  let res;
+  if (body) {
+    res = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
+  } else {
+    res = await fetch(API_URL + '?' + new URLSearchParams(params).toString());
+  }
+  const j = await res.json();
+  if (!j.ok) throw new Error(j.error || '오류가 발생했습니다.');
+  return j;
+}
+
+function colorOk(c) { return c && c.toLowerCase() !== '#ffffff' && c.toLowerCase() !== 'white'; }
+
+function makeCell(tag, c, extraClass) {
+  const el = document.createElement(tag);
+  el.textContent = c.v;
+  if (c.rs > 1) el.rowSpan = c.rs;
+  if (c.cs > 1) el.colSpan = c.cs;
+  el.style.background = c.bg || '#ffffff';
+  if (c.fc && c.fc.toLowerCase() !== '#000000') el.style.color = c.fc;
+  if (extraClass) el.className = extraClass;
+  return el;
+}
+
+function render(data) {
+  current = data;
+  closeBar();
+  const nt = $('notice');
+  if (data.closed) { nt.textContent = '취합이 마감되었습니다. (' + data.deadline + '까지) 조회만 가능합니다.'; nt.className = 'closed'; }
+  else if (data.deadline) { nt.textContent = data.deadline + '까지 입력 가능'; nt.className = ''; }
+  else { nt.textContent = ''; }
+  const out = $('out');
+  const oldWrap = out.querySelector('.wrap');
+  const keepX = oldWrap ? oldWrap.scrollLeft : 0, keepY = oldWrap ? oldWrap.scrollTop : 0;
+  out.innerHTML = '';
+  if (!data.rows.length) {
+    out.innerHTML = '<div class="empty">"' + escapeHtml(data.name) + '" 이름의 스케줄이 없습니다. 이름을 다시 확인하세요.</div>';
+    return;
+  }
+  const wrap = document.createElement('div'); wrap.className = 'wrap';
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  data.header.forEach((row) => {
+    const tr = document.createElement('tr');
+    row.forEach((c, j) => {
+      if (!c) return;
+      const th = makeCell('th', c, j === 0 ? 'sticky' : '');
+      if (!colorOk(c.bg)) th.style.background = '#92d050';
+      tr.appendChild(th);
+    });
+    thead.appendChild(tr);
+  });
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  data.rows.forEach((r) => {
+    const tr = document.createElement('tr');
+    r.cells.forEach((c, j) => {
+      if (!c) return;
+      if (j >= data.dayOff) {
+        const day = data.days[j - data.dayOff];
+        const td = makeCell('td', c, 'day' + (c.v === '연차' || c.v === '추가' ? ' v-text' : ''));
+        td.dataset.day = day;
+        if (data.closed) td.classList.add('locked');
+        else td.addEventListener('click', (e) => { e.stopPropagation(); select(td, r, day); });
+        tr.appendChild(td);
+      } else {
+        tr.appendChild(makeCell('td', c, j === 0 ? 'sticky store' : ''));
+      }
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  out.appendChild(wrap);
+  wrap.scrollLeft = keepX; wrap.scrollTop = keepY;
+}
+
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m])); }
+
+function select(td, rowObj, day) {
+  if (selected) selected.td.classList.remove('selected');
+  selected = { td, rowObj, day };
+  td.classList.add('selected');
+  $('barTitle').textContent = rowObj.store + ' · ' + day + '일  (현재: ' + (td.textContent || '휴무') + ')';
+  $('bar').classList.add('show');
+}
+
+function closeBar() {
+  if (selected) selected.td.classList.remove('selected');
+  selected = null;
+  $('bar').classList.remove('show');
+}
+
+function setValue(v) {
+  if (!selected || !current) return;
+  if (ALLOWED.indexOf(v) < 0) return;               // 허용 값 외에는 무시
+  const { td, rowObj, day } = selected;
+  if (td.textContent === v) { closeBar(); return; }
+  td.textContent = v;
+  td.classList.toggle('v-text', v === '연차' || v === '추가');
+  td.classList.add('pending');
+  closeBar();
+
+  const body = { sheet: current.sheet, name: current.name, row: rowObj.row, store: rowObj.store, day: day, value: v };
+  pending++;
+  setStatus('저장 중…');
+  queue = queue.then(async () => {
+    try {
+      const j = await api(null, body);
+      pending--;
+      if (pending === 0) { render(j.data); setStatus('저장됨 ✓', 'ok'); }
+      else td.classList.remove('pending');
+    } catch (err) {
+      pending--;
+      setStatus('저장 실패: ' + err.message, 'err');
+      alert('저장하지 못했습니다.\n' + err.message);
+      load(true);
+    }
+  });
+}
+
+async function load(silent) {
+  const name = $('name').value.trim();
+  if (!name) { setStatus('이름을 입력하세요.', 'err'); return; }
+  store('scheduleName', name);
+  if (!silent) setStatus('불러오는 중…');
+  try {
+    const j = await api({ action: 'schedule', name });
+    render(j.data);
+    if (!silent) setStatus('');
+  } catch (err) {
+    setStatus(err.message, 'err');
+  }
+}
+
+function init() {
+  $('name').value = store('scheduleName') || '';
+  if ($('name').value) load();
+}
+
+$('go').addEventListener('click', () => load());
+$('name').addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
+document.querySelectorAll('#bar button').forEach((b) => b.addEventListener('click', (e) => { e.stopPropagation(); setValue(b.dataset.v); }));
+$('bar').addEventListener('click', (e) => e.stopPropagation());
+document.addEventListener('click', () => closeBar());
+document.addEventListener('keydown', (e) => {
+  if (!selected || e.target.tagName === 'INPUT') return;
+  if (e.key === '1') setValue('1');
+  else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); setValue(''); }
+  else if (e.key === 'Escape') closeBar();
+});
+init();
+</script>
+</body>
+</html>
